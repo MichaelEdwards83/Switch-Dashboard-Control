@@ -22,23 +22,30 @@ function App() {
     useEffect(() => {
         const fetchAllDetails = async () => {
             const newData = {};
-            await Promise.all(switches.map(async (sw) => {
-                try {
-                    const res = await fetch(`/api/switch/details?ip=${sw.ip}&ports=${sw.ports || 48}`);
-                    const json = await res.json();
-                    if (json.ports) {
-                        newData[sw.ip] = {
-                            ...json.ports,
-                            connectivity: json.connectivity,
-                            systemName: json.systemName,
-                            systemModel: json.systemModel,
-                            vlanMap: json.vlanMap
-                        };
+            const batchSize = 5;
+
+            // Process switches in batches to avoid overwhelming the backend
+            for (let i = 0; i < switches.length; i += batchSize) {
+                const batch = switches.slice(i, i + batchSize);
+                await Promise.all(batch.map(async (sw) => {
+                    try {
+                        const res = await fetch(`/api/switch/details?ip=${sw.ip}&ports=${sw.ports || 48}`);
+                        const json = await res.json();
+                        if (json.ports) {
+                            newData[sw.ip] = {
+                                ...json.ports,
+                                connectivity: json.connectivity,
+                                systemName: json.systemName,
+                                systemModel: json.systemModel,
+                                vlanMap: json.vlanMap
+                            };
+                        }
+                    } catch (e) {
+                        console.error(`Failed to poll ${sw.ip}`);
                     }
-                } catch (e) {
-                    console.error(`Failed to poll ${sw.ip}`);
-                }
-            }));
+                }));
+            }
+            // Update state after all batches (or could update per batch)
             setPortData(prev => ({ ...prev, ...newData }));
         };
 
@@ -77,14 +84,28 @@ function App() {
 
     const applyVlan = async () => {
         if (!selectedPort || !vlanId || !activeSwitchIp) return;
-        const cmd = `configure\ninterface 0/${selectedPort}\nvlan pvid ${vlanId}\nexit\nexit`;
+
+        const currentPortObj = portData[activeSwitchIp]?.[selectedPort];
+        const portName = currentPortObj?.name || `0/${selectedPort}`;
+        const oldVlanId = currentPortObj?.vlan;
+
+        let cmd = `configure\ninterface ${portName}\nvlan pvid ${vlanId}\nvlan participation include ${vlanId}\n`;
+
+        // If explicitly changing VLANs (and not just re-applying), remove old membership
+        // Verify loose equality because vlanId is string from input, oldVlanId is number from API
+        if (oldVlanId && oldVlanId != vlanId) {
+            cmd += `vlan participation exclude ${oldVlanId}\n`;
+        }
+
+        cmd += `exit\nexit`;
         await runCommand(activeSwitchIp, cmd);
         setSelectedPort(null);
     };
 
     const cyclePoe = async () => {
         if (!selectedPort || !activeSwitchIp) return;
-        const cmd = `configure\ninterface 0/${selectedPort}\npoe power cycle\nexit\nexit`;
+        const portName = portData[activeSwitchIp]?.[selectedPort]?.name || `0/${selectedPort}`;
+        const cmd = `configure\ninterface ${portName}\npoe power cycle\nexit\nexit`;
         await runCommand(activeSwitchIp, cmd);
         setSelectedPort(null);
     };
