@@ -1,0 +1,22 @@
+export const switches = [
+    { name: 'SW-GRN-CORE-RED', ip: '172.31.29.2', ports: 96 },
+    { name: 'SW-GRN-ENG-BCAST-C', ip: '172.31.29.3', ports: 48 },
+    { name: 'SW-GRN-ENG-BCAST-A', ip: '172.31.29.4', ports: 48 },
+    { name: 'SW-GRN-ENG-SCREENS-1G', ip: '172.31.29.5', ports: 48 },
+    { name: 'SW-GRN-ENG-SCREENS-10G', ip: '172.31.29.19', ports: 24 },
+    { name: 'SW-GRN-ENG-LED', ip: '172.31.29.6', ports: 48 },
+    { name: 'SW-GRN-ENG-GFX_A', ip: '172.31.29.7', ports: 24 },
+    { name: 'SW-GRN-ENG-RECORDS', ip: '172.31.29.8', ports: 48 },
+    { name: 'SW-GRN-ENG-DSM', ip: '172.31.29.9', ports: 24 },
+    { name: 'SW-GRN-ENG-FOH', ip: '172.31.29.10', ports: 24 },
+    { name: 'SW-GRN-ENG-OP-SCREENS', ip: '172.31.29.11', ports: 48 },
+    { name: 'SW-GRN-ENG-OP-PLAYBACK', ip: '172.31.29.12', ports: 48 },
+    { name: 'SW-GRN-ENG-OP-SWR-TD', ip: '172.31.29.13', ports: 24 },
+    { name: 'SW-GRN-ENG-OP-CAM-CTRL', ip: '172.31.29.14', ports: 24 },
+    { name: 'SW-GRN-ENG-OP-RECORDS', ip: '172.31.29.15', ports: 48 },
+    { name: 'SW-GRN-ENG-OP-EIC-COB', ip: '172.31.29.16', ports: 24 },
+    { name: 'SW-GRN-ENG-OP-TECH-PROD', ip: '172.31.29.17', ports: 24 },
+    { name: 'SW-GRN-SPARE', ip: '172.31.29.18', ports: 24 },
+    { name: 'SW-PROJECTION', ip: '172.31.29.22', ports: 24 },
+    { name: 'SW-DOUGLAS', ip: '172.31.29.69', ports: 24 }
+];

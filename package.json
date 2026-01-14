@@ -1,0 +1,28 @@
+{
+    "name": "honeybadger-switch-controller",
+    "private": true,
+    "version": "0.1.0",
+    "type": "module",
+    "scripts": {
+        "dev": "concurrently \"node server.js\" \"vite --host\"",
+        "build": "vite build",
+        "preview": "vite preview",
+        "start": "node server.js"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "dotenv": "^16.6.1",
+        "express": "^4.22.1",
+        "lucide-react": "^0.300.0",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+        "ssh2": "^1.17.0"
+    },
+    "devDependencies": {
+        "@types/react": "^18.2.43",
+        "@types/react-dom": "^18.2.17",
+        "@vitejs/plugin-react": "^4.2.1",
+        "concurrently": "^8.2.2",
+        "vite": "^7.3.1"
+    }
+}
