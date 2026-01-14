@@ -2,7 +2,7 @@
 
 A real-time visual controller and monitoring dashboard for Netgear M4300 series switches.
 
-![Dashboard Preview](https://github.com/MichaelEdwards83/Switch-Dashboard-Control/assets/placeholder.png)
+![Dashboard Preview](./assets/dashboard_hero.png)
 
 ## Features
 
