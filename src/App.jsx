@@ -28,24 +28,26 @@ function App() {
             for (let i = 0; i < switches.length; i += batchSize) {
                 const batch = switches.slice(i, i + batchSize);
                 await Promise.all(batch.map(async (sw) => {
+                    if (!sw.ip_oob) return;
                     try {
-                        const res = await fetch(`/api/switch/details?ip=${sw.ip}&ports=${sw.ports || 48}`);
+                        const res = await fetch(`/api/switch/details?ip=${sw.ip_oob}&ports=${sw.ports || 48}`);
                         const json = await res.json();
-                        if (json.ports) {
-                            newData[sw.ip] = {
+                        if (json.ports || json.connectivity) {
+                            newData[sw.ip_oob] = {
                                 ...json.ports,
                                 connectivity: json.connectivity,
                                 systemName: json.systemName,
                                 systemModel: json.systemModel,
-                                vlanMap: json.vlanMap
+                                vlanMap: json.vlanMap,
+                                derivedPortCount: json.derivedPortCount
                             };
                         }
                     } catch (e) {
-                        console.error(`Failed to poll ${sw.ip}`);
+                        console.error(`Failed to poll ${sw.ip_oob}`);
                     }
                 }));
             }
-            // Update state after all batches (or could update per batch)
+            // Update state after all batches
             setPortData(prev => ({ ...prev, ...newData }));
         };
 
@@ -84,30 +86,47 @@ function App() {
 
     const applyVlan = async () => {
         if (!selectedPort || !vlanId || !activeSwitchIp) return;
+        setLoading(true);
+        setIsConsoleExpanded(true);
+        const portId = selectedPort;
 
-        const currentPortObj = portData[activeSwitchIp]?.[selectedPort];
-        const portName = currentPortObj?.name || `0/${selectedPort}`;
-        const oldVlanId = currentPortObj?.vlan;
-
-        let cmd = `configure\ninterface ${portName}\nvlan pvid ${vlanId}\nvlan participation include ${vlanId}\n`;
-
-        // If explicitly changing VLANs (and not just re-applying), remove old membership
-        // Verify loose equality because vlanId is string from input, oldVlanId is number from API
-        if (oldVlanId && oldVlanId != vlanId) {
-            cmd += `vlan participation exclude ${oldVlanId}\n`;
+        try {
+            const res = await fetch('/api/vlan/set', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip: activeSwitchIp, port: portId, vlanId: vlanId })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            setOutput(prev => `[${activeSwitchIp}] VLAN ${vlanId} Applied to Port ${portId}\n` + prev);
+        } catch (err) {
+            setOutput(prev => `[${activeSwitchIp}] VLAN Error: ${err.message}\n` + prev);
+        } finally {
+            setLoading(false);
+            setSelectedPort(null);
         }
-
-        cmd += `exit\nexit`;
-        await runCommand(activeSwitchIp, cmd);
-        setSelectedPort(null);
     };
 
     const cyclePoe = async () => {
         if (!selectedPort || !activeSwitchIp) return;
-        const portName = portData[activeSwitchIp]?.[selectedPort]?.name || `0/${selectedPort}`;
-        const cmd = `configure\ninterface ${portName}\npoe power cycle\nexit\nexit`;
-        await runCommand(activeSwitchIp, cmd);
-        setSelectedPort(null);
+        setLoading(true);
+        setIsConsoleExpanded(true);
+
+        try {
+            const res = await fetch('/api/poe/cycle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip: activeSwitchIp, port: selectedPort })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            setOutput(prev => `[${activeSwitchIp}] Port ${selectedPort} Rebooted (PoE Cycle)\n` + prev);
+        } catch (err) {
+            setOutput(prev => `[${activeSwitchIp}] PoE Error: ${err.message}\n` + prev);
+        } finally {
+            setLoading(false);
+            setSelectedPort(null);
+        }
     };
 
     return (
@@ -121,18 +140,27 @@ function App() {
             </div>
 
             <div className="rack-mount-rails">
-                {switches.map((sw) => (
-                    <div key={sw.ip} className="rack-unit">
-                        <SwitchFaceplate
-                            portCount={sw.ports || 48}
-                            portData={portData[sw.ip]}
-                            systemName={portData[sw.ip]?.systemName}
-                            systemModel={portData[sw.ip]?.systemModel}
-                            vlanMap={portData[sw.ip]?.vlanMap}
-                            onPortClick={(pid) => handlePortClick(sw.ip, pid)}
-                        />
-                    </div>
-                ))}
+                {switches.map((sw) => {
+                    const status = portData[sw.ip_oob]?.connectivity || { oob: false, trunk: false, active: 'none' };
+                    const cleanName = sw.name.replace('SW-GRN-', '');
+                    const pCount = portData[sw.ip_oob]?.derivedPortCount || sw.ports || 48;
+
+                    return (
+                        <div key={sw.ip_oob} className="rack-unit">
+                            <SwitchFaceplate
+                                portCount={pCount}
+                                portData={portData[sw.ip_oob] || {}}
+                                systemName={cleanName}
+                                systemModel={portData[sw.ip_oob]?.systemModel}
+                                vlanMap={portData[sw.ip_oob]?.vlanMap || {}}
+                                onPortClick={(pid) => handlePortClick(sw.ip_oob, pid)}
+                                connectivity={status}
+                                ipOob={sw.ip_oob}
+                                ipTrunk={sw.ip_trunk}
+                            />
+                        </div>
+                    );
+                })}
                 {switches.length === 0 && (
                     <div className="empty-rack">
                         <span>Loading Rack Units...</span>
@@ -158,9 +186,31 @@ function App() {
             {selectedPort && (
                 <div className="modal-overlay">
                     <div className="modal-content">
-                        <div className="modal-header">
-                            <h3>Config: {switches.find(s => s.ip === activeSwitchIp)?.name} : Port {selectedPort}</h3>
-                            <button className="close-btn" onClick={() => setSelectedPort(null)}><X size={20} /></button>
+                        <div className="modal-header" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '0.5rem', position: 'relative' }}>
+                            <div style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#fff' }}>
+                                    {switches.find(s => s.ip_oob === activeSwitchIp || s.ip === activeSwitchIp)?.name.replace('SW-GRN-', '')} : Port {selectedPort}
+                                </h3>
+                                <button className="close-btn" onClick={() => setSelectedPort(null)}><X size={20} /></button>
+                            </div>
+
+                            {portData[activeSwitchIp]?.[selectedPort]?.description ? (
+                                <div style={{
+                                    fontSize: '0.9rem',
+                                    color: '#94a3b8',
+                                    background: '#1e293b',
+                                    padding: '4px 8px',
+                                    borderRadius: '4px',
+                                    border: '1px solid #334155',
+                                    marginTop: '4px',
+                                    width: '100%',
+                                    boxSizing: 'border-box'
+                                }}>
+                                    {portData[activeSwitchIp]?.[selectedPort]?.description}
+                                </div>
+                            ) : (
+                                <div style={{ fontSize: '0.8rem', color: '#64748b', fontStyle: 'italic' }}>No Description</div>
+                            )}
                         </div>
                         <div className="modal-body">
                             <div className="control-group">

@@ -1,457 +1,433 @@
 import express from 'express';
 import cors from 'cors';
-import { Client } from 'ssh2';
-import dotenv from 'dotenv';
-import net from 'net';
 import { switches } from './config.js';
+import dotenv from 'dotenv';
+import axios from 'axios';
+import https from 'https';
 
 dotenv.config();
 
 const app = express();
-const PORT = 3002; // Different port than dashboard
-
 app.use(cors());
 app.use(express.json());
 
-// MOCK MODE: Set to true via .env if you are testing without real switches
-const MOCK_MODE = process.env.MOCK_MODE === 'true';
+const PORT = 3002;
+const MOCK_MODE = false;
 
-const getSSHConfig = (host) => ({
-    host: host,
-    port: 22,
-    username: process.env.SWITCH_USER, // e.g., 'admin'
-    password: process.env.SWITCH_PASS, // e.g., 'FuseFuse123!'
-    agent: false,
-    tryKeyboard: true,
-    // debug: (msg) => console.log(`[SSH Debug] ${msg}`), // Verbose logging disabled for prod cleanup
-    readyTimeout: 30000,
-    keepaliveInterval: 10000,
-    algorithms: {
-        kex: [
-            'diffie-hellman-group1-sha1',
-            'diffie-hellman-group14-sha1',
-            'ecdh-sha2-nistp256',
-            'ecdh-sha2-nistp384',
-            'ecdh-sha2-nistp521',
-            'diffie-hellman-group-exchange-sha256',
-            'diffie-hellman-group14-sha256',
-            'curve25519-sha256',
-            'curve25519-sha256@libssh.org'
-        ],
-        cipher: [
-            'aes128-ctr', 'aes192-ctr', 'aes256-ctr',
-            'aes128-cbc', '3des-cbc',
-            'aes128-gcm@openssh.com', 'aes256-gcm@openssh.com'
-        ],
-        serverHostKey: ['ssh-rsa', 'ssh-dss', 'ecdsa-sha2-nistp256', 'ssh-ed25519']
-    }
+// Ignore self-signed certs
+const httpsAgent = new https.Agent({
+    rejectUnauthorized: false,
+    minVersion: 'TLSv1'
 });
 
-// Helper to run a sequence of commands in a Shell session
-const runShellSequence = (host) => {
-    return new Promise((resolve, reject) => {
-        const conn = new Client();
-        const config = getSSHConfig(host);
-
-        // Collected outputs
-        let sysInfoOutput = '';
-        let statusAllOutput = '';
-        let poeOutput = '';
-        let vlanOutput = '';
-        let vlanPortOutput = '';
-
-        // State machine
-        // init -> enabled -> term_len -> sysinfo -> status -> poe -> vlan -> vlan_port_capture -> done
-        let step = 'init';
-
-        let timeout = setTimeout(() => {
-            conn.end();
-            reject(new Error('Shell session timed out'));
-        }, 60000); // Increased timeout for extra command
-
-        conn.on('ready', () => {
-            conn.shell((err, stream) => {
-                if (err) {
-                    conn.end();
-                    return reject(err);
-                }
-
-                stream.on('close', () => {
-                    clearTimeout(timeout);
-                    conn.end();
-                    resolve({ sysInfoOutput, statusAllOutput, poeOutput, vlanOutput, vlanPortOutput });
-                }).on('data', (data) => {
-                    const chunk = data.toString();
-
-                    // Capture data based on step
-                    if (step === 'sysinfo_capture') sysInfoOutput += chunk;
-                    if (step === 'status_capture') statusAllOutput += chunk;
-                    if (step === 'poe_capture') poeOutput += chunk;
-                    if (step === 'vlan_capture') vlanOutput += chunk;
-                    if (step === 'vlan_port_capture') vlanPortOutput += chunk;
-
-                    // Handle Prompts
-                    if (chunk.includes('Password:')) {
-                        stream.write(config.password + '\n');
-                        return;
-                    }
-
-                    // Check for User Mode >
-                    if (step === 'init' && chunk.trim().endsWith('>')) {
-                        stream.write('enable\n');
-                        step = 'enabled';
-                    }
-
-                    // Check for Privileged Mode #
-                    if (chunk.trim().endsWith('#')) {
-                        if (step === 'enabled' || step === 'init') {
-                            stream.write('terminal length 0\n');
-                            step = 'term_len';
-                        } else if (step === 'term_len') {
-                            stream.write('show sysinfo\n');
-                            step = 'sysinfo_capture';
-                        } else if (step === 'sysinfo_capture') {
-                            stream.write('show port status all\n');
-                            step = 'status_capture';
-                        } else if (step === 'status_capture') {
-                            stream.write('show poe\n');
-                            step = 'poe_capture';
-                        } else if (step === 'poe_capture') {
-                            stream.write('show vlan\n');
-                            step = 'vlan_capture';
-                        } else if (step === 'vlan_capture') {
-                            stream.write('show vlan port all\n');
-                            step = 'vlan_port_capture';
-                        } else if (step === 'vlan_port_capture') {
-                            conn.end(); // Done
-                        }
-                    }
-                });
-            });
-        })
-            .on('error', (err) => {
-                clearTimeout(timeout);
-                console.error(`[SSH Error] Connection to ${host} failed:`, err.message);
-                reject(err);
-            })
-            .connect(config);
-    });
-};
-
-const fetchSwitchData = async (host) => {
-    if (MOCK_MODE) {
-        return new Promise(resolve => {
-            setTimeout(() => {
-                resolve({
-                    statusOutput: `0/1 Enable Auto 100 Full Up\n0/2 Enable Auto 100 Full Down`,
-                    poeOutput: `0/1 Enable On\n`,
-                    sysInfoOutput: `System Name......... Mock-Switch-01\nSystem Model Identifier.... M4300-48X-Mock`,
-                    vlanOutput: ``,
-                    vlanPortOutput: ``
-                });
-            }, 300);
+class NetgearConfigAgent {
+    constructor(ip, username, password) {
+        this.ip = ip;
+        this.username = username;
+        this.password = password;
+        this.baseUrl = `https://${ip}:8443/api/v1`;
+        this.token = null;
+        this.client = axios.create({
+            baseURL: this.baseUrl,
+            httpsAgent,
+            timeout: 30000,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' }
         });
     }
 
-    try {
-        console.log(`[SSH] Connecting to ${host}...`);
-        const { sysInfoOutput, statusAllOutput, poeOutput, vlanOutput, vlanPortOutput } = await runShellSequence(host);
-        console.log(`[SSH Success] Scraped data from ${host}. SysInfo len: ${sysInfoOutput.length}`);
-        return { statusOutput: statusAllOutput, poeOutput, sysInfoOutput, vlanOutput, vlanPortOutput };
-    } catch (err) {
-        console.error(`[SSH Failed] ${host}: ${err.message}`);
-        throw err;
+    async login() {
+        try {
+            const res = await this.client.post('/login', {
+                login: { username: this.username, password: this.password }
+            });
+            const token = res.data.login?.token;
+            if (token) {
+                this.token = token;
+                this.client.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+                return true;
+            }
+        } catch (err) {
+            console.error(`[${this.ip}] Login failed: ${err.message}`);
+        }
+        return false;
     }
-};
 
-// Helper to execute a configuration command via Shell
-const runConfigCommand = (host, command) => {
-    return new Promise((resolve, reject) => {
-        const conn = new Client();
-        const config = getSSHConfig(host);
+    async getDeviceInfo() {
+        try {
+            const res = await this.client.get('/device_info');
+            return res.data.deviceInfo; // { serialNumber, model, swVer, ... }
+        } catch (err) {
+            console.error(`[${this.ip}] Device Info failed: ${err.message}`);
+            return null;
+        }
+    }
 
-        let output = '';
-        let step = 'init';
 
-        // 30s timeout for config changes
-        let timeout = setTimeout(() => {
-            conn.end();
-            reject(new Error('Config session timed out'));
-        }, 30000);
 
-        conn.on('ready', () => {
-            conn.shell((err, stream) => {
-                if (err) {
-                    conn.end();
-                    return reject(err);
+    async getPortStats(count = 48) {
+        if (!this.token && !(await this.login())) return null;
+
+        // No more offset calculation. We fetch what we can and map based on content.
+        // We'll fetch a safe range. If users have 48 ports, we fetch up to 60 just in case 
+        // there are backplane ports shifting the IDs.
+        const startId = 1;
+        const endId = startId + count + 12; // Buffer for potential backplane ports
+
+        const chunks = [];
+        for (let i = startId; i <= endId; i += 8) {
+            chunks.push(i);
+        }
+
+        const allStats = [];
+
+        for (const chunkStart of chunks) {
+            try {
+                const batchPromises = [];
+                const batchEnd = Math.min(chunkStart + 7, endId);
+
+                for (let pid = chunkStart; pid <= batchEnd; pid++) {
+                    batchPromises.push(
+                        this.client.get(`/sw_portstats?portid=${pid}`).catch(e => null)
+                    );
                 }
 
-                stream.on('close', () => {
-                    clearTimeout(timeout);
-                    conn.end();
-                    resolve(output);
-                }).on('data', (data) => {
-                    const chunk = data.toString();
-                    output += chunk;
-
-                    if (chunk.includes('Password:')) {
-                        stream.write(config.password + '\n');
-                        return;
-                    }
-
-                    if (step === 'init' && chunk.trim().endsWith('>')) {
-                        stream.write('enable\n');
-                        step = 'enabled';
-                    }
-
-                    if (chunk.trim().endsWith('#')) {
-                        if (step === 'enabled' || step === 'init') {
-                            stream.write('terminal length 0\n');
-                            step = 'term_len';
-                        } else if (step === 'term_len') {
-                            // Send the actual command block
-                            // Ensure we write it line by line or invalid chars might issue
-                            // The command from frontend contains \n
-                            console.log(`[SSH Config] Executing on ${host}:\n${command}`);
-                            stream.write(command + '\n');
-                            step = 'executing';
-                        } else if (step === 'executing') {
-                            // We got a prompt BACK after executing.
-                            // This means command finished (or at least the buffer flushed).
-                            // Wait a tiny bit or just close?
-                            // M4300 echoes commands, so we see the prompt again.
-                            conn.end();
+                const results = await Promise.all(batchPromises);
+                results.forEach(r => {
+                    if (r && r.data && r.data.switchStatsPort) {
+                        if (Array.isArray(r.data.switchStatsPort)) {
+                            allStats.push(...r.data.switchStatsPort);
+                        } else {
+                            allStats.push(r.data.switchStatsPort);
                         }
                     }
                 });
-            });
-        })
-            .on('error', (err) => {
-                clearTimeout(timeout);
-                console.error(`[SSH Error] Config connection to ${host} failed:`, err.message);
-                reject(err);
-            })
-            .connect(config);
-    });
-};
 
-const executeCommand = async (host, command) => {
-    if (MOCK_MODE) {
-        console.log(`[Mock Exec] ${host}: ${command}`);
-        return "Mock Success";
+            } catch (err) {
+                console.error(`[${this.ip}] Chunk fetch failed: ${err.message}`);
+            }
+        }
+        return allStats;
     }
-    return runConfigCommand(host, command);
+
+    async getVlanInfo(vlanId) {
+        try {
+            const res = await this.client.get(`/swcfg_vlan?vlanid=${vlanId}`);
+            return res.data.switchConfigVlan;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    // Helper to find API ID from App ID (Physical ID)
+    async getApiIdForPhysical(physId) {
+        // We need to scan ports to find the one matching 1/0/{physId}
+        // Since we don't store a persistent map in the agent, we might need to fetch or rely on cache.
+        // Ideally, we fetch stats/config to find it.
+        // For efficiency, we can assume the cache in 'pollSwitch' is up to date, 
+        // but this method is called by 'setVlan' which might be standalone.
+
+        // Quick scan strategy:
+        // Try guessing ID = physId
+        // Try guessing ID = physId + 8 (common offset)
+        // Verify with exact check?
+
+        // Better: Fetch a range and find match.
+        // This is expensive for a single click, but safe.
+        // OR, we rely on the `switchCache` which should be populated by the poller.
+
+        // Let's rely on cache if available, else scan.
+        // Actually, let's implement a dynamic scan.
+        const stats = await this.getPortStats(52); // Fetch enough to find it
+        if (!stats) return physId; // Fallback
+
+        const match = stats.find(p => {
+            // Look for Name or Description containing 1/0/{physId}
+            const nameStr = p.intfName || p.name || p.interface || p.description || "";
+            return nameStr.includes(`1/0/${physId}`);
+        });
+
+        if (match) return match.portId;
+
+        // Fallback: If no "1/0/X" found, assume 1:1 or old offset logic?
+        // User said "ignore description", meaning ignore "Backplane".
+        // If we can't find "1/0/X", maybe we just use ID?
+        return physId;
+    }
+
+    async setVlan(appPortId, vlanId) {
+        if (!this.token && !(await this.login())) throw new Error('Auth failed');
+        try {
+            const portId = await this.getApiIdForPhysical(appPortId);
+            const vId = parseInt(vlanId);
+
+            // 1. Fetch Current PVID
+            const getRes = await this.client.get(`/swcfg_port?portid=${portId}`);
+            if (getRes.data.resp?.status !== 'success') throw new Error('Failed to fetch port config');
+            const config = getRes.data.switchPortConfig;
+            const oldPvid = config.portVlanId;
+
+            // 2. Add to New VLAN (Untagged)
+            const vRes = await this.client.get(`/swcfg_vlan_membership?vlanid=${vId}`);
+            let members = vRes.data.vlanMembership?.portMembers || [];
+            if (!members.find(m => m.port === portId)) {
+                members.push({ port: portId, tagged: false });
+                await this.client.post('/swcfg_vlan_membership', {
+                    vlanMembership: { vlanid: vId, portMembers: members }
+                });
+            }
+
+            // 3. Update PVID
+            config.portVlanId = vId;
+            config.ID = parseInt(config.ID);
+            await this.client.post(`/swcfg_port?portid=${portId}`, { switchPortConfig: config });
+
+            // 4. Remove from Old VLAN
+            if (oldPvid !== vId && oldPvid !== 0) {
+                await this.removeVlanMember(oldPvid, portId);
+            }
+
+            return true;
+        } catch (err) {
+            console.error(`[${this.ip}] Set VLAN failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async cyclePoe(appPortId) {
+        if (!this.token && !(await this.login())) throw new Error('Auth failed');
+        try {
+            const portId = await this.getApiIdForPhysical(appPortId);
+            await this.client.post(`/swcfg_port?portid=${portId}`, {
+                switchPortConfig: { isPoE: false }
+            });
+            await new Promise(r => setTimeout(r, 1000));
+            await this.client.post(`/swcfg_port?portid=${portId}`, {
+                switchPortConfig: { isPoE: true }
+            });
+            return true;
+        } catch (err) {
+            console.error(`[${this.ip}] PoE Cycle failed: ${err.message}`);
+            throw err;
+        }
+    }
+}
+
+// In-Memory Cache
+const switchCache = {};
+
+// Polling Loop
+// Helper to determine port count based on model
+function getPortCountFromModel(model) {
+    if (!model) return 48; // Default
+    const m = model.toUpperCase();
+    if (m.includes('96X')) return 96;
+    if (m.includes('52G')) return 52;
+    if (m.includes('48X')) return 48;
+    if (m.includes('28G')) return 28;
+    if (m.includes('24X')) return 24;
+    if (m.includes('12X12F')) return 24;
+    if (m.includes('8X8F')) return 16;
+    if (m.includes('16X')) return 16;
+    return 48; // Fallback
+}
+
+async function pollSwitch(sw) {
+    console.log(`Polling ${sw.name} (${sw.ip_oob})...`);
+
+    // ... (rest of logic)
+
+    let activeIp = sw.ip_oob;
+    let usedChannel = 'oob';
+    let oobStatus = false;
+    let trunkStatus = false;
+
+    // Check OOB
+    const agentOob = new NetgearConfigAgent(sw.ip_oob, process.env.SWITCH_USER, process.env.SWITCH_PASS);
+    if (await agentOob.login()) {
+        oobStatus = true;
+    }
+
+    // Check Trunk if configured
+    if (sw.ip_trunk) {
+        const agentTrunk = new NetgearConfigAgent(sw.ip_trunk, process.env.SWITCH_USER, process.env.SWITCH_PASS);
+        // We only really *need* to login to verify connectivity, but a ping equivalent is better.
+        // Login is a safe robust check.
+        if (await agentTrunk.login()) {
+            trunkStatus = true;
+        }
+    }
+
+    // Determine active path
+    let agent = null;
+    if (oobStatus) {
+        agent = agentOob; // Already logged in
+        activeIp = sw.ip_oob;
+        usedChannel = 'oob';
+    } else if (trunkStatus) {
+        agent = new NetgearConfigAgent(sw.ip_trunk, process.env.SWITCH_USER, process.env.SWITCH_PASS);
+        await agent.login(); // Need to login again or reuse? Reuse is complex, just new agent.
+        activeIp = sw.ip_trunk;
+        usedChannel = 'trunk';
+    }
+
+    if (!oobStatus && !trunkStatus) {
+        // All paths down
+        const currentCache = switchCache[sw.ip_oob] || {};
+        switchCache[sw.ip_oob] = {
+            ...currentCache,
+            connectivity: { oob: false, trunk: false, active: 'none' }
+        };
+        return;
+    }
+
+    // Fetch Data using Active Agent
+    const resultAgent = (usedChannel === 'oob') ? agentOob : new NetgearConfigAgent(sw.ip_trunk, process.env.SWITCH_USER, process.env.SWITCH_PASS);
+    if (usedChannel === 'trunk' && !resultAgent.token) await resultAgent.login();
+
+    try {
+        const deviceInfo = await resultAgent.getDeviceInfo();
+        const derivedPortCount = getPortCountFromModel(deviceInfo?.model);
+        const portStats = await resultAgent.getPortStats(derivedPortCount); // Use derived count!
+
+        if (deviceInfo && portStats) {
+            const portMap = {};
+            const foundVlans = new Set();
+
+            portStats.forEach(p => {
+                let appId = null;
+                const nameStr = p.intfName || p.name || p.interface || "";
+                const match = nameStr.match(/1\/0\/(\d+)/);
+                if (match) {
+                    appId = parseInt(match[1]);
+                } else {
+                    appId = p.portId;
+                }
+
+                if (!appId || appId < 1) return;
+
+                const isUp = p.status === 1 || p.oprState === 1;
+                const pvid = (p.vlans && p.vlans.length > 0) ? p.vlans[0] : 1;
+                if (p.vlans) p.vlans.forEach(v => foundVlans.add(v));
+
+                portMap[appId] = {
+                    id: appId,
+                    apiId: p.portId,
+                    name: `1/0/${appId}`,
+                    description: p.myDesc || p.description || '',
+                    up: isUp,
+                    poe: p.poeStatus === 1,
+                    vlan: pvid,
+                    speed: p.speed === 130 ? '1G' : 'Unknown'
+                };
+            });
+
+            // Update VLAN Map
+            const currentCache = switchCache[sw.ip_oob] || {};
+            const vlanMap = currentCache.vlanMap || { 1: 'Default' };
+            for (const vid of foundVlans) {
+                if (!vlanMap[vid]) {
+                    const vInfo = await resultAgent.getVlanInfo(vid);
+                    if (vInfo) vlanMap[vid] = vInfo.name;
+                    else vlanMap[vid] = `VLAN ${vid}`;
+                }
+            }
+
+            switchCache[sw.ip_oob] = {
+                ports: portMap,
+                systemName: sw.name,
+                systemModel: deviceInfo.model,
+                connectivity: {
+                    oob: oobStatus,
+                    trunk: trunkStatus,
+                    active: usedChannel
+                },
+                vlanMap: vlanMap,
+                activeIp: activeIp,
+                derivedPortCount: derivedPortCount
+            };
+        }
+    } catch (err) {
+        console.error(`[${sw.ip_oob}] Poll Data Error: ${err.message}`);
+    }
 };
 
-app.post('/api/execute', async (req, res) => {
-    const { ip, command } = req.body;
+const pollSwitches = async () => {
+    // Process in batches of 5 to avoid overwhelming network/server
+    const BATCH_SIZE = 5;
+    // console.log(`[Polling] Starting batch cycle for ${switches.length} switches...`);
+
+    for (let i = 0; i < switches.length; i += BATCH_SIZE) {
+        const batch = switches.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(sw => pollSwitch(sw)));
+    }
+
+    // console.log(`[Polling] Cycle complete. Waiting 15s...`);
+    setTimeout(pollSwitches, 15000); // 15s wait to allow slow chunked polling
+};
+
+// Start Polling
+pollSwitches(); // Initial run
+
+// API Routes
+app.get('/api/switches', (req, res) => {
+    // Send full config including trunk IPs
+    res.json(switches);
+});
+
+app.get('/api/switch/details', (req, res) => {
+    const { ip } = req.query; // This will likely be the OOB ip as unique ID
+    if (MOCK_MODE) {
+        return res.json({ ports: {}, connectivity: { oob: true, trunk: true, active: 'oob' } });
+    }
+
+    const data = switchCache[ip] || { ports: {}, connectivity: { oob: false, trunk: false, active: 'none' } };
+    res.json(data);
+});
+
+// New Config Endpoints
+app.post('/api/vlan/set', async (req, res) => {
+    const { ip, port, vlanId } = req.body; // 'ip' is the ID key (OOB IP)
+
+    // Find the switch in config to get the CURRENTLY ACTIVE IP if possible, or probe
+    // Actually, switchCache has `activeIp`.
+
+    const cached = switchCache[ip];
+    const targetIp = cached?.activeIp || ip; // Use active route or fallback to param
+
+    const agent = new NetgearConfigAgent(targetIp, process.env.SWITCH_USER, process.env.SWITCH_PASS);
     try {
-        const output = await executeCommand(ip, command);
-        res.json({ output });
+        await agent.setVlan(port, vlanId);
+
+        // Optimistic Cache Update
+        if (switchCache[ip] && switchCache[ip].ports && switchCache[ip].ports[port]) {
+            switchCache[ip].ports[port].vlan = parseInt(vlanId);
+        }
+
+        res.json({ success: true });
     } catch (err) {
-        console.error(`Execute failed on ${ip}:`, err);
         res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/api/switches', (req, res) => {
-    res.json(switches);
+app.post('/api/poe/cycle', async (req, res) => {
+    const { ip, port } = req.body;
+
+    const cached = switchCache[ip];
+    const targetIp = cached?.activeIp || ip;
+
+    const agent = new NetgearConfigAgent(targetIp, process.env.SWITCH_USER, process.env.SWITCH_PASS);
+    try {
+        await agent.cyclePoe(port);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// Helper to generate mock port data
-const generateMockPortData = (portCount) => {
-    const ports = {};
-    for (let i = 1; i <= portCount; i++) {
-        const isUp = Math.random() > 0.3;
-        ports[i] = {
-            id: i,
-            name: `1/0/${i}`,
-            up: isUp,
-            poe: isUp && Math.random() > 0.7,
-            vlan: isUp ? [1, 10, 20, 30, 99][Math.floor(Math.random() * 5)] : null,
-            speed: isUp ? '1G' : 'Down'
-        };
-    }
-    return ports;
-};
-
-// Generate mock VLAN map
-const mockVlanMap = {
-    1: 'Default',
-    10: 'Camera_Net',
-    20: 'Voice_VoIP',
-    30: 'Corporate',
-    99: 'Management'
-};
-
-app.get('/api/switch/details', async (req, res) => {
-    const { ip, ports: queryPorts } = req.query;
-
-    if (MOCK_MODE) {
-        setTimeout(() => {
-            res.json({
-                portCount: parseInt(queryPorts) || 48,
-                systemName: 'Mock-Switch-01',
-                systemModel: 'M4300-48X-Mock',
-                ports: generateMockPortData(parseInt(queryPorts) || 48),
-                vlanMap: mockVlanMap,
-                connectivity: { oob: true, trunk: true, active: 'mock' }
-            });
-        }, 300);
-        return;
-    }
-
-    // REAL SSH IMPLEMENTATION
-    const oobIp = ip;
-    const lastOctet = ip.split('.').pop();
-    const trunkIp = `172.29.10.${lastOctet}`;
-
-    const checkPort22 = (host) => {
-        return new Promise(resolve => {
-            const socket = new net.Socket();
-            socket.setTimeout(2000);
-            socket.on('connect', () => { socket.destroy(); resolve(true); });
-            socket.on('timeout', () => { socket.destroy(); resolve(false); });
-            socket.on('error', () => { socket.destroy(); resolve(false); });
-            socket.connect(22, host);
-        });
-    };
-
-    try {
-        const [oobAlive, trunkAlive] = await Promise.all([
-            checkPort22(oobIp),
-            checkPort22(trunkIp)
-        ]);
-
-        let activeIp = null;
-        if (oobAlive) activeIp = oobIp;
-        else if (trunkAlive) activeIp = trunkIp;
-
-        const ports = {};
-        let discoveredPortCount = parseInt(queryPorts) || 48;
-        let systemName = 'Unknown Switch';
-        let systemModel = 'Unknown Model';
-        let vlanMap = {};
-
-        if (activeIp) {
-            try {
-                const { statusOutput, poeOutput, sysInfoOutput, vlanOutput, vlanPortOutput } = await fetchSwitchData(activeIp);
-
-                // Parse System Info
-                const sysNameMatch = sysInfoOutput.match(/System Name\.+\s+(.+)/i);
-                if (sysNameMatch) systemName = sysNameMatch[1].trim();
-
-                const sysModelMatch = sysInfoOutput.match(/System Model Identifier\.+\s+(.+)/i) ||
-                    sysInfoOutput.match(/System Description\.+\s+([^\,]+)/i);
-                if (sysModelMatch) systemModel = sysModelMatch[1].trim();
-
-                // Parse VLAN Names
-                // Format: 1       default                          Default
-                const vlanLines = vlanOutput.split('\n');
-                vlanLines.forEach(line => {
-                    const match = line.match(/^\s*(\d+)\s+([\w\-]+)\s+/);
-                    if (match) {
-                        vlanMap[parseInt(match[1])] = match[2];
-                    }
-                });
-
-                // Parse VLAN PVIDs
-                // Format: Interface PVID ...
-                // 1/0/1    10        ...
-                const portVlanMap = {};
-                const vlanPortLines = vlanPortOutput.split('\n');
-                vlanPortLines.forEach(line => {
-                    const match = line.match(/^\s*(\d+\/\d+\/\d+|\d+\/\d+)\s+(\d+)\s+/);
-                    if (match) {
-                        const portStr = match[1];
-                        const pvid = parseInt(match[2]);
-                        const portId = parseInt(portStr.split('/').pop());
-                        portVlanMap[portId] = pvid;
-                    }
-                });
-
-                // Parse SHOW PORT STATUS ALL
-                // Format: 0/1        Enable    Auto       100 Full   Up     Enable Enable Long
-                const statusLines = statusOutput.split('\n');
-                let maxPortId = 0;
-
-                statusLines.forEach(line => {
-                    // Match 0/1 ... Up/Down or 1/0/1 ... Up/Down
-                    const match = line.match(/^\s*(\d+\/\d+|\d+\/\d+\/\d+)\s+.*?\s+(Up|Down)\s+/i);
-
-                    if (match) {
-                        const portStr = match[1]; // 0/1 or 1/0/1
-                        const status = match[2];
-                        const portId = parseInt(portStr.split('/').pop()); // 1
-
-                        if (portId > maxPortId) maxPortId = portId;
-
-                        // Use PVID from mapping, default to 1
-                        const pvid = portVlanMap[portId] || 1;
-
-                        ports[portId] = {
-                            id: portId,
-                            name: portStr, // Capture full name e.g. 1/0/1
-                            up: status.toLowerCase() === 'up',
-                            vlan: pvid, // Default PVID
-                            poe: false
-                        };
-                    }
-                });
-
-                if (maxPortId > 0 && maxPortId > discoveredPortCount / 2) {
-                    // Only update if looks reasonable
-                    discoveredPortCount = maxPortId;
-                }
-
-                // Parse PoE Status
-                const poeLines = poeOutput.split('\n');
-                poeLines.forEach(line => {
-                    // 1/0/1 ... On
-                    const match = line.match(/^\s*(\d+\/\d+|\d+\/\d+\/\d+)\s+\w+\s+(On|Off|Searching|Fault)\s+/i);
-                    if (match) {
-                        const portId = parseInt(match[1].split('/').pop());
-                        const isPowered = match[2].toLowerCase() === 'on';
-                        if (ports[portId]) ports[portId].poe = isPowered;
-                    }
-                });
-
-                // Ensure all ports exist
-                for (let i = 1; i <= discoveredPortCount; i++) {
-                    if (!ports[i]) ports[i] = { id: i, name: `1/0/${i}`, up: false, poe: false, vlan: null, speed: '' };
-                }
-
-            } catch (err) {
-                console.error(`Failed to scrape data from ${activeIp}:`, err.message);
-                for (let i = 1; i <= discoveredPortCount; i++) {
-                    if (!ports[i]) ports[i] = { id: i, name: `1/0/${i}`, up: false, poe: false, vlan: null, speed: '' };
-                }
-            }
-        } else {
-            for (let i = 1; i <= discoveredPortCount; i++) {
-                ports[i] = { id: i, name: `1/0/${i}`, up: false, poe: false, vlan: null, speed: '' };
-            }
-        }
-
-        res.json({
-            portCount: discoveredPortCount,
-            systemName,
-            systemModel,
-            vlanMap,
-            ports: ports,
-            connectivity: {
-                oob: oobAlive,
-                trunk: trunkAlive,
-                active: activeIp === oobIp ? 'oob' : (activeIp === trunkIp ? 'trunk' : 'none')
-            }
-        });
-
-    } catch (error) {
-        console.error(`System Error for ${ip}:`, error);
-        res.status(500).json({ error: error.message, ports: {} });
-    }
+app.post('/api/execute', (req, res) => {
+    res.status(400).json({ error: "Deprecated. Use /api/vlan/set or /api/poe/cycle" });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Switch Controller API running on http://0.0.0.0:${PORT}`);
+    console.log(`Switch Controller API (REST) running on http://0.0.0.0:${PORT}`);
 });

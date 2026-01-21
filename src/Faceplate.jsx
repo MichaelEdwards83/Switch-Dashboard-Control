@@ -1,7 +1,12 @@
 import React, { useMemo } from 'react';
 import { Cable, Wifi, Power } from 'lucide-react';
 
-export function SwitchFaceplate({ portCount, portData = {}, systemName, systemModel, vlanMap = {}, onPortClick }) {
+export function SwitchFaceplate({ portCount, portData = {}, systemName, systemModel, vlanMap = {}, onPortClick, connectivity, ipOob, ipTrunk }) {
+    // Create props object for backward compatibility with my previous edit
+    const props = { connectivity, ipOob, ipTrunk };
+    // Debug Log
+    // console.log('Faceplate Render:', { systemName, type: typeof portData, isArray: Array.isArray(portData), keys: portData ? Object.keys(portData).length : 'null' });
+
     // Generate ports
     const ports = useMemo(() => {
         return Array.from({ length: portCount }, (_, i) => ({ id: i + 1, isTop: (i + 1) % 2 !== 0 }));
@@ -20,8 +25,10 @@ export function SwitchFaceplate({ portCount, portData = {}, systemName, systemMo
     // Extract unique VLANs for Legend
     const vlanLegend = useMemo(() => {
         const vlans = new Set();
-        Object.values(portData).forEach(p => {
-            if (p.vlan) vlans.add(p.vlan);
+        const data = portData || {}; // Safety fallback
+        Object.values(data).forEach(p => {
+            // Filter out metadata (primitives, nulls) and only look at Port objects
+            if (p && typeof p === 'object' && p.vlan) vlans.add(p.vlan);
         });
         return Array.from(vlans).sort((a, b) => a - b);
     }, [portData]);
@@ -45,7 +52,7 @@ export function SwitchFaceplate({ portCount, portData = {}, systemName, systemMo
             <div className="faceplate-header">
                 <div className="netgear-branding">
                     <span className="brand">{displayName}</span>
-                    <span className="model">{displayModel}</span>
+                    {/* Removed Model Text */}
                 </div>
 
                 {/* VLAN Legend */}
@@ -56,26 +63,35 @@ export function SwitchFaceplate({ portCount, portData = {}, systemName, systemMo
                             <span>VLAN {vlan} {vlanMap[vlan] ? `(${vlanMap[vlan]})` : ''}</span>
                         </div>
                     ))}
-
-                    {/* Connectivity Indicators */}
-                    <div className="connectivity-status">
-                        <div className="status-item" title="Management Network (172.31.29.x)">
-                            <div className={`status-dot ${portData.connectivity?.oob ? 'online' : 'offline'}`} />
-                            <span>OOB</span>
-                        </div>
-                        <div className="status-item" title="Trunk Network (172.29.10.x)">
-                            <div className={`status-dot ${portData.connectivity?.trunk ? 'online' : 'offline'}`} />
-                            <span>TRUNK</span>
-                        </div>
-                    </div>
                 </div>
             </div>
 
             <div className="ports-wrapper">
                 <div className="ports-group-left">
                     <div className="status-leds">
-                        <div className="led power active" />
-                        <div className="led fan active" />
+                        {/* OOB Status Button */}
+                        <a
+                            href={`https://${props.ipOob}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`led-button ${props.connectivity?.oob ? 'active' : 'offline'}`}
+                            title={`OOB Management: ${props.ipOob}`}
+                        >
+                            OOB
+                        </a>
+
+                        {/* Trunk Connector / Status */}
+                        {props.ipTrunk && (
+                            <a
+                                href={`https://${props.ipTrunk}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`led-button ${props.connectivity?.trunk ? 'active' : 'offline'}`}
+                                title={`Trunk Management: ${props.ipTrunk}`}
+                            >
+                                TRUNK
+                            </a>
+                        )}
                     </div>
                 </div>
 

@@ -138,6 +138,47 @@
 .ports-grid {
     display: flex;
     gap: 4px;
+    /* Scale ports to fit available space if desired, or keep fixed */
+    /* flex: 1; */
+    /* justify-content: space-between; */
+}
+
+/* New LED Button Style for OOB/Trunk */
+.led-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 24px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    text-decoration: none;
+    border-radius: 2px;
+    background: #334155;
+    border: 1px solid #475569;
+    transition: all 0.2s;
+    margin-bottom: 4px;
+}
+
+.led-button:hover {
+    filter: brightness(1.2);
+}
+
+.led-button.active {
+    background: #10b981;
+    /* Green */
+    box-shadow: 0 0 5px #10b981;
+    border-color: #059669;
+    color: #064e3b;
+}
+
+.led-button.offline {
+    background: #ef4444;
+    /* Red */
+    box-shadow: 0 0 5px #ef4444;
+    border-color: #b91c1c;
+    color: #450a0a;
 }
 
 .port-column {
@@ -232,11 +273,14 @@
 }
 
 .modal-content {
-    background: #1e293b;
+    background: #0f172a;
+    /* Darker background */
     border: 1px solid #334155;
-    border-radius: 8px;
+    border-radius: 12px;
+    /* More rounded */
     width: 400px;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+    /* Deep shadow */
 }
 
 .modal-header {
